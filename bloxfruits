@@ -1,0 +1,420 @@
+-- Clean up old instances, UI, and loops if re-executed
+if getgenv().VibecodedHub_BloxFruits_Cleanup then
+	pcall(getgenv().VibecodedHub_BloxFruits_Cleanup)
+end
+
+-- Services
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local CoreGui = game:GetService("CoreGui")
+local SoundService = game:GetService("SoundService")
+local UserInputService = game:GetService("UserInputService")
+
+local localPlayer = Players.LocalPlayer
+
+-- Determine safe UI parent
+local uiParent = (gethui and gethui()) or CoreGui or localPlayer:WaitForChild("PlayerGui")
+
+-- Remove lingering instances
+for _, gui in ipairs(uiParent:GetChildren()) do
+	if gui.Name == "VibecodedHub_BF_Folder" or gui.Name == "WindUI" then
+		gui:Destroy()
+	end
+end
+
+-- Create dedicated folder for ESP markers
+local visualFolder = Instance.new("Folder")
+visualFolder.Name = "VibecodedHub_BF_Folder"
+visualFolder.Parent = uiParent
+
+-- Load WindUI Library
+local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+
+-- State & Tracking
+local fruitEspEnabled = true
+local chestEspEnabled = false
+local flowerEspEnabled = false
+
+local trackedFruits = {}  -- [obj] = { Billboard, TextLabel, TargetPart }
+local trackedChests = {}  -- [obj] = { Billboard, TextLabel, TargetPart }
+local trackedFlowers = {} -- [obj] = { Billboard, TextLabel, TargetPart }
+local connections = {}
+
+-- Satisfying Audio Settings State
+local soundSettings = {
+	Enabled = true,
+	Volume = 1
+}
+
+local function playInputSound()
+	if not soundSettings.Enabled then return end
+	pcall(function()
+		local sound = Instance.new("Sound")
+		sound.SoundId = "rbxassetid://113108830240353"
+		sound.Volume = soundSettings.Volume
+		sound.Parent = SoundService
+		sound:Play()
+		sound.Ended:Connect(function()
+			sound:Destroy()
+		end)
+	end)
+end
+
+-- Create WindUI Window
+local Window = WindUI:CreateWindow({
+	Title = "Vibecoded Hub",
+	Icon = "flame",
+	Author = "Blox Fruits",
+	Folder = "VibecodedHub_BloxFruits",
+	Size = UDim2.fromOffset(470, 380),
+	Transparent = true,
+	Theme = "Dark",
+})
+
+-- Set Menu Keybind to N
+Window:SetToggleKey(Enum.KeyCode.N)
+
+-- ==========================================
+-- TABS
+-- ==========================================
+local EspTab = Window:Tab({
+	Title = "ESP",
+	Icon = "eye",
+})
+
+local SatisfyingTab = Window:Tab({
+	Title = "Satisfying",
+	Icon = "sparkles",
+})
+
+local StatusParagraph = EspTab:Paragraph({
+	Title = "Active Detection Status",
+	Desc = "Scanning workspace..."
+})
+
+-- ==========================================
+-- HELPERS & VALIDATION
+-- ==========================================
+local function getTargetPart(obj)
+	if obj:IsA("BasePart") then
+		return obj
+	elseif obj:IsA("Model") or obj:IsA("Tool") then
+		return obj:FindFirstChild("Handle") or obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
+	end
+	return nil
+end
+
+local function isPlayerOwned(obj)
+	if Players:GetPlayerFromCharacter(obj) or obj:IsDescendantOf(Workspace.CurrentCamera) then
+		return true
+	end
+	local ancestorModel = obj:FindFirstAncestorOfClass("Model")
+	if ancestorModel and ancestorModel:FindFirstChildOfClass("Humanoid") then
+		return true
+	end
+	return false
+end
+
+local function isValidFruit(obj)
+	if not obj or not obj.Parent or not obj:IsDescendantOf(Workspace) then return false end
+	if not (obj:IsA("Tool") or obj:IsA("Model")) then return false end
+	if isPlayerOwned(obj) then return false end
+
+	local lowerName = obj.Name:lower()
+	if not lowerName:find("fruit", 1, true) then
+		return false
+	end
+
+	local targetPart = getTargetPart(obj)
+	if not targetPart or targetPart.Position.Magnitude < 1 then
+		return false
+	end
+
+	return true
+end
+
+local function isValidChest(obj)
+	if not obj or not obj.Parent or not obj:IsDescendantOf(Workspace) then return false end
+	if not (obj:IsA("Model") or obj:IsA("BasePart")) then return false end
+	if isPlayerOwned(obj) then return false end
+
+	local lowerName = obj.Name:lower()
+	if not (lowerName:find("chest1", 1, true) or lowerName:find("chest2", 1, true) or lowerName:find("chest3", 1, true) or lowerName == "chest") then
+		return false
+	end
+
+	local targetPart = getTargetPart(obj)
+	if not targetPart or targetPart.Position.Magnitude < 1 then
+		return false
+	end
+
+	return true
+end
+
+local function isValidFlower(obj)
+	if not obj or not obj.Parent or not obj:IsDescendantOf(Workspace) then return false end
+	if not (obj:IsA("Model") or obj:IsA("BasePart")) then return false end
+	if isPlayerOwned(obj) then return false end
+
+	local lowerName = obj.Name:lower()
+	if not (lowerName == "flower1" or lowerName == "flower2") then
+		return false
+	end
+
+	local targetPart = getTargetPart(obj)
+	if not targetPart or targetPart.Position.Magnitude < 1 then
+		return false
+	end
+
+	return true
+end
+
+local function makeTag(targetPart, tagName, displayText, color, enabledState)
+	local billboard = Instance.new("BillboardGui")
+	billboard.Name = tagName
+	billboard.Size = UDim2.new(0, 160, 0, 45)
+	billboard.StudsOffset = Vector3.new(0, 2.5, 0)
+	billboard.AlwaysOnTop = true
+	billboard.Enabled = enabledState
+	billboard.Adornee = targetPart
+	billboard.Parent = visualFolder
+
+	local textLabel = Instance.new("TextLabel")
+	textLabel.Size = UDim2.new(1, 0, 1, 0)
+	textLabel.BackgroundTransparency = 1
+	textLabel.Text = displayText
+	textLabel.TextColor3 = color
+	textLabel.TextStrokeTransparency = 0.3
+	textLabel.TextSize = 14
+	textLabel.Font = Enum.Font.GothamBold
+	textLabel.Parent = billboard
+
+	return billboard, textLabel
+end
+
+local function createFruitESP(obj)
+	if trackedFruits[obj] or not isValidFruit(obj) then return end
+	local targetPart = getTargetPart(obj)
+	if not targetPart then return end
+
+	local billboard, textLabel = makeTag(targetPart, "Fruit_Tag", obj.Name, Color3.fromRGB(255, 95, 110), fruitEspEnabled)
+	trackedFruits[obj] = { Billboard = billboard, TextLabel = textLabel, TargetPart = targetPart }
+end
+
+local function createChestESP(obj)
+	if trackedChests[obj] or not isValidChest(obj) then return end
+	local targetPart = getTargetPart(obj)
+	if not targetPart then return end
+
+	local billboard, textLabel = makeTag(targetPart, "Chest_Tag", "Chest", Color3.fromRGB(255, 215, 70), chestEspEnabled)
+	trackedChests[obj] = { Billboard = billboard, TextLabel = textLabel, TargetPart = targetPart }
+end
+
+local function createFlowerESP(obj)
+	if trackedFlowers[obj] or not isValidFlower(obj) then return end
+	local targetPart = getTargetPart(obj)
+	if not targetPart then return end
+
+	local flowerLabel = (obj.Name:lower() == "flower1") and "Blue Flower" or "Red Flower"
+	local flowerColor = (obj.Name:lower() == "flower1") and Color3.fromRGB(90, 175, 255) or Color3.fromRGB(255, 80, 80)
+	local billboard, textLabel = makeTag(targetPart, "Flower_Tag", flowerLabel, flowerColor, flowerEspEnabled)
+	trackedFlowers[obj] = { Billboard = billboard, TextLabel = textLabel, TargetPart = targetPart }
+end
+
+local function clearTable(tbl)
+	for _, data in pairs(tbl) do
+		if data.Billboard then data.Billboard:Destroy() end
+	end
+	table.clear(tbl)
+end
+
+local function scanWorkspace()
+	for _, obj in ipairs(Workspace:GetDescendants()) do
+		if fruitEspEnabled and isValidFruit(obj) then
+			createFruitESP(obj)
+		end
+		if chestEspEnabled and isValidChest(obj) then
+			createChestESP(obj)
+		end
+		if flowerEspEnabled and isValidFlower(obj) then
+			createFlowerESP(obj)
+		end
+	end
+end
+
+-- ==========================================
+-- ESP TAB CONTROLS
+-- ==========================================
+EspTab:Toggle({
+	Title = "Devil Fruit ESP",
+	Desc = "Highlights spawned Devil Fruits in Workspace with distance",
+	Value = true,
+	Callback = function(state)
+		fruitEspEnabled = state
+		if fruitEspEnabled then
+			scanWorkspace()
+		else
+			clearTable(trackedFruits)
+		end
+	end
+})
+
+EspTab:Toggle({
+	Title = "Chest ESP",
+	Desc = "Highlights Chests across the map",
+	Value = false,
+	Callback = function(state)
+		chestEspEnabled = state
+		if chestEspEnabled then
+			scanWorkspace()
+		else
+			clearTable(trackedChests)
+		end
+	end
+})
+
+EspTab:Toggle({
+	Title = "Flower ESP (V2 Quest)",
+	Desc = "Highlights Blue & Red Flowers for Race V2",
+	Value = false,
+	Callback = function(state)
+		flowerEspEnabled = state
+		if flowerEspEnabled then
+			scanWorkspace()
+		else
+			clearTable(trackedFlowers)
+		end
+	end
+})
+
+-- ==========================================
+-- SATISFYING TAB CONTROLS
+-- ==========================================
+SatisfyingTab:Paragraph({
+	Title = "Audio Settings",
+	Desc = "Toggle global input sound feedback."
+})
+
+SatisfyingTab:Toggle({
+	Title = "Enable Input Sound",
+	Desc = "Plays sound effect on every keypress (WASD, etc.) and mouse click",
+	Value = true,
+	Callback = function(state)
+		soundSettings.Enabled = state
+	end
+})
+
+local inputConn = UserInputService.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.Keyboard or input.UserInputType == Enum.UserInputType.MouseButton1 then
+		playInputSound()
+	end
+end)
+table.insert(connections, inputConn)
+
+-- ==========================================
+-- FRAME UPDATE LOOP
+-- ==========================================
+local lastStatusText = ""
+local renderConn = RunService.RenderStepped:Connect(function()
+	local character = localPlayer.Character
+	local root = character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head"))
+	local originPos = root and root.Position
+
+	local fruitCount = 0
+	local statusLines = {}
+
+	for obj, data in pairs(trackedFruits) do
+		if not fruitEspEnabled or not isValidFruit(obj) then
+			if data.Billboard then data.Billboard:Destroy() end
+			trackedFruits[obj] = nil
+		else
+			local targetPart = data.TargetPart
+			if targetPart and targetPart:IsDescendantOf(Workspace) then
+				data.Billboard.Enabled = true
+				fruitCount += 1
+				local dist = originPos and math.floor((targetPart.Position - originPos).Magnitude) or 0
+				data.TextLabel.Text = string.format("%s\n[%d studs]", obj.Name, dist)
+				table.insert(statusLines, string.format("• %s [%d studs]", obj.Name, dist))
+			else
+				data.Billboard.Enabled = false
+			end
+		end
+	end
+
+	for obj, data in pairs(trackedChests) do
+		if not chestEspEnabled or not isValidChest(obj) then
+			if data.Billboard then data.Billboard:Destroy() end
+			trackedChests[obj] = nil
+		else
+			local targetPart = data.TargetPart
+			if targetPart and targetPart:IsDescendantOf(Workspace) then
+				data.Billboard.Enabled = true
+				local dist = originPos and math.floor((targetPart.Position - originPos).Magnitude) or 0
+				data.TextLabel.Text = string.format("Chest\n[%d studs]", dist)
+			else
+				data.Billboard.Enabled = false
+			end
+		end
+	end
+
+	for obj, data in pairs(trackedFlowers) do
+		if not flowerEspEnabled or not isValidFlower(obj) then
+			if data.Billboard then data.Billboard:Destroy() end
+			trackedFlowers[obj] = nil
+		else
+			local targetPart = data.TargetPart
+			if targetPart and targetPart:IsDescendantOf(Workspace) then
+				data.Billboard.Enabled = true
+				local labelName = (obj.Name:lower() == "flower1") and "Blue Flower" or "Red Flower"
+				local dist = originPos and math.floor((targetPart.Position - originPos).Magnitude) or 0
+				data.TextLabel.Text = string.format("%s\n[%d studs]", labelName, dist)
+			else
+				data.Billboard.Enabled = false
+			end
+		end
+	end
+
+	local newStatusText = (#statusLines > 0)
+		and table.concat(statusLines, "\n")
+		or "No spawned Devil Fruits detected."
+	if newStatusText ~= lastStatusText then
+		lastStatusText = newStatusText
+		pcall(function()
+			StatusParagraph:SetDesc(newStatusText)
+		end)
+	end
+end)
+table.insert(connections, renderConn)
+
+-- Detect newly spawned objects instantly
+local addedConn = Workspace.DescendantAdded:Connect(function(obj)
+	task.wait(0.25)
+	if fruitEspEnabled and isValidFruit(obj) then
+		createFruitESP(obj)
+	end
+	if chestEspEnabled and isValidChest(obj) then
+		createChestESP(obj)
+	end
+	if flowerEspEnabled and isValidFlower(obj) then
+		createFlowerESP(obj)
+	end
+end)
+table.insert(connections, addedConn)
+
+-- Global Cleanup Function
+getgenv().VibecodedHub_BloxFruits_Cleanup = function()
+	for _, conn in ipairs(connections) do
+		if conn.Connected then conn:Disconnect() end
+	end
+	clearTable(trackedFruits)
+	clearTable(trackedChests)
+	clearTable(trackedFlowers)
+	if visualFolder then visualFolder:Destroy() end
+	if Window and Window.Destroy then
+		pcall(function() Window:Destroy() end)
+	end
+end
+
+-- Initial Scan
+scanWorkspace()
