@@ -1,113 +1,670 @@
 -- Clean up old instances and connections if re-executed
 if getgenv().VibecodedHub_Universal_Cleanup then
-    pcall(getgenv().VibecodedHub_Universal_Cleanup)
+	pcall(getgenv().VibecodedHub_Universal_Cleanup)
 end
 
 -- Services
+local Players = game:GetService("Players")
 local SoundService = game:GetService("SoundService")
 local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+local MarketplaceService = game:GetService("MarketplaceService")
+local TeleportService = game:GetService("TeleportService")
 
--- Sound Settings State
+local LocalPlayer = Players.LocalPlayer
+local supportedUrl = "https://loadstring.net/raw/TCiFuJc4kK"
+
+-- State
+local connections = {}
+local destroyed = false
+local fakeProductIdInput = ""
+
 local soundSettings = {
-    Enabled = true,
-    Volume = 1 -- Default volume (1 = 100%)
+	Enabled = true,
+	Volume = 1 -- Default volume (1 = 100%)
 }
 
-local connections = {}
+local function bind(signal, fn)
+	local conn = signal:Connect(fn)
+	table.insert(connections, conn)
+	return conn
+end
 
--- Function to play the input sound effect
 local function playInputSound()
-    if not soundSettings.Enabled then return end
-    pcall(function()
-        local sound = Instance.new("Sound")
-        sound.SoundId = "rbxassetid://113108830240353"
-        sound.Volume = soundSettings.Volume
-        sound.Parent = SoundService
-        sound:Play()
-        sound.Ended:Connect(function()
-            sound:Destroy()
-        end)
-    end)
+	if not soundSettings.Enabled or destroyed then return end
+	pcall(function()
+		local sound = Instance.new("Sound")
+		sound.SoundId = "rbxassetid://113108830240353"
+		sound.Volume = soundSettings.Volume
+		sound.Parent = SoundService
+		sound:Play()
+		sound.Ended:Connect(function()
+			sound:Destroy()
+		end)
+	end)
+end
+
+local function commas(n)
+	local s = tostring(math.floor(tonumber(n) or 0))
+	return (s:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", ""))
+end
+
+local function copyText(text)
+	local fn = setclipboard or toclipboard or set_clipboard or (Clipboard and Clipboard.set)
+	return fn ~= nil and (pcall(fn, tostring(text)))
+end
+
+local function getEnum(enumName, itemName)
+	local ok, val = pcall(function()
+		return Enum[enumName][itemName]
+	end)
+	return ok and val or nil
 end
 
 -- Load WindUI Library
 local successWind, WindUI = pcall(function()
-    return loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+	return loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 end)
 
 if not successWind or not WindUI then
-    warn("[Vibecoded Hub] Failed to load WindUI library.")
-    return
+	warn("[Vibecoded Hub] Failed to load WindUI library.")
+	return
+end
+
+local function notify(title, content, duration)
+	pcall(function()
+		WindUI:Notify({
+			Title = title,
+			Content = content,
+			Duration = duration or 3
+		})
+	end)
 end
 
 -- Create Window
 local Window = WindUI:CreateWindow({
-    Title = "Vibecoded Hub",
-    Icon = "sparkles",
-    Author = "Universal",
-    Folder = "VibecodedHub_Universal",
-    Size = UDim2.fromOffset(480, 300),
-    Transparent = true,
-    Theme = "Dark",
+	Title = "Vibecoded Hub",
+	Icon = "sparkles",
+	Author = "Universal",
+	Folder = "VibecodedHub_Universal",
+	Size = UDim2.fromOffset(520, 400),
+	Transparent = true,
+	Theme = "Dark",
 })
 
 -- Set Menu Keybind to N
 Window:SetToggleKey(Enum.KeyCode.N)
 
--- Create Tab: Satisfying
+-- ==========================================
+-- TABS
+-- ==========================================
+local ProductFakerTab = Window:Tab({
+	Title = "Product Faker",
+	Icon = "shopping-bag",
+})
+
+local GamesTab = Window:Tab({
+	Title = "Games",
+	Icon = "gamepad-2",
+})
+
 local SatisfyingTab = Window:Tab({
-    Title = "Satisfying",
-    Icon = "sparkles",
+	Title = "Satisfying",
+	Icon = "sparkles",
+})
+
+-- ==========================================
+-- SATISFYING TAB (AUDIO)
+-- ==========================================
+SatisfyingTab:Paragraph({
+	Title = "Game Status",
+	Desc = "Current Place ID: " .. tostring(game.PlaceId) .. "\nRunning Vibecoded Hub (Universal)."
 })
 
 SatisfyingTab:Paragraph({
-    Title = "Game Status",
-    Desc = "Current Place ID: " .. tostring(game.PlaceId) .. "\nRunning Vibecoded Hub (Universal)."
+	Title = "Audio Settings",
+	Desc = "Manage global input sound toggles and volume level."
 })
 
--- Section for Sound Controls
-SatisfyingTab:Paragraph({
-    Title = "Audio Settings",
-    Desc = "Manage global input sound toggles and volume level."
-})
-
--- Toggle to enable/disable sound
 SatisfyingTab:Toggle({
-    Title = "Enable Input Sound",
-    Desc = "Plays sound effect on every keypress (WASD, etc.) and mouse click",
-    Value = true,
-    Callback = function(state)
-        soundSettings.Enabled = state
-    end
+	Title = "Enable Input Sound",
+	Desc = "Plays sound effect on every keypress (WASD, etc.) and mouse click",
+	Value = true,
+	Callback = function(state)
+		soundSettings.Enabled = state
+	end
 })
 
--- Slider to control volume
 SatisfyingTab:Slider({
-    Title = "Sound Volume",
-    Desc = "Adjust audio volume intensity",
-    Min = 0.1,
-    Max = 5,
-    Default = 1,
-    Step = 0.1,
-    Callback = function(value)
-        soundSettings.Volume = value
-    end
+	Title = "Sound Volume",
+	Desc = "Adjust audio volume intensity",
+	Min = 0.1,
+	Max = 5,
+	Default = 1,
+	Step = 0.1,
+	Callback = function(value)
+		soundSettings.Volume = value
+	end
 })
 
--- Global Keyboard & Mouse Input Listener
-local inputConn = UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if input.UserInputType == Enum.UserInputType.Keyboard or input.UserInputType == Enum.UserInputType.MouseButton1 then
-        playInputSound()
-    end
+bind(UserInputService.InputBegan, function(input, gameProcessed)
+	if input.UserInputType == Enum.UserInputType.Keyboard or input.UserInputType == Enum.UserInputType.MouseButton1 then
+		playInputSound()
+	end
 end)
-table.insert(connections, inputConn)
+
+-- ==========================================
+-- PRODUCT FAKER LOGIC & TAB
+-- ==========================================
+local knownKinds = {}
+
+local infoTypes = {
+	Product = getEnum("InfoType", "Product"),
+	Gamepass = getEnum("InfoType", "GamePass"),
+	Asset = getEnum("InfoType", "Asset"),
+	Bundle = getEnum("InfoType", "Bundle"),
+	Subscription = getEnum("InfoType", "Subscription"),
+}
+
+local infoCache = {}
+local function getInfo(kind, id)
+	local key = kind .. ":" .. tostring(id)
+	if infoCache[key] ~= nil then
+		return infoCache[key]
+	end
+	local info = false
+	if infoTypes[kind] and tonumber(id) then
+		local ok, res = pcall(function()
+			return MarketplaceService:GetProductInfo(tonumber(id), infoTypes[kind])
+		end)
+		if ok and type(res) == "table" then
+			info = res
+		end
+	end
+	infoCache[key] = info
+	return info
+end
+
+local firePurchase = {
+	Product = function(id)
+		MarketplaceService:SignalPromptProductPurchaseFinished(LocalPlayer.UserId, id, true)
+	end,
+	Gamepass = function(id)
+		MarketplaceService:SignalPromptGamePassPurchaseFinished(LocalPlayer, id, true)
+	end,
+	Asset = function(id)
+		MarketplaceService:SignalPromptPurchaseFinished(LocalPlayer, id, true)
+	end,
+	Bundle = function(id)
+		MarketplaceService:SignalPromptBundlePurchaseFinished(LocalPlayer, id, true)
+	end,
+}
+
+local function detectKind(id)
+	local known = knownKinds[tostring(id)]
+	if known and firePurchase[known] then
+		return known
+	end
+	for _, kind in ipairs({"Product", "Gamepass", "Asset"}) do
+		if getInfo(kind, id) then
+			knownKinds[tostring(id)] = kind
+			return kind
+		end
+	end
+	return "Product"
+end
+
+local function fakePurchase(id)
+	local kind = detectKind(id)
+	firePurchase[kind](id)
+	return kind
+end
+
+local function runProductByValue(rawValue)
+	local id = tonumber((tostring(rawValue or ""):gsub("%s", "")):match("^%d+$"))
+	if not id then
+		notify("Product Faker", "Enter a valid numeric Product / Pass ID first.")
+		return
+	end
+	local ok, res = pcall(fakePurchase, id)
+	if ok then
+		notify("Product Faker", ("Faked %s (%d)"):format(res:lower(), id))
+	else
+		warn("[Vibecoded Hub] Product faker error: " .. tostring(res))
+		notify("Product Faker", "Failed to fake purchase. Check console (F9).")
+	end
+end
+
+ProductFakerTab:Paragraph({
+	Title = "Fake Purchase Runner",
+	Desc = "Enter a Developer Product, Gamepass, or Asset ID and press Run Product. Works in games that trust client purchase signals."
+})
+
+ProductFakerTab:Input({
+	Title = "Run Product ID",
+	Desc = "Paste or type a Product / Gamepass ID",
+	Placeholder = "Enter ID here...",
+	Callback = function(text)
+		fakeProductIdInput = tostring(text or "")
+	end
+})
+
+ProductFakerTab:Button({
+	Title = "Run Product",
+	Desc = "Fakes the purchase for the entered ID",
+	Callback = function()
+		runProductByValue(fakeProductIdInput)
+	end
+})
+
+local LoggerParagraph = ProductFakerTab:Paragraph({
+	Title = "Prompt Logger",
+	Desc = "Waiting for purchase prompts..."
+})
+
+local CatalogParagraph = ProductFakerTab:Paragraph({
+	Title = "Game Gamepasses & Products",
+	Desc = "Scanning current game..."
+})
+
+local logEntries = {}
+local lastPrompt = {}
+
+local function recordPrompt(kind, id)
+	if destroyed or id == nil then return end
+	local key = kind .. ":" .. tostring(id)
+	local now = os.clock()
+	if lastPrompt[key] and now - lastPrompt[key] < 0.5 then return end
+	lastPrompt[key] = now
+
+	task.spawn(function()
+		local info = getInfo(kind, id)
+		if destroyed then return end
+		knownKinds[tostring(id)] = kind
+
+		local name = info and (info.Name or info.DisplayName) or ("ID " .. tostring(id))
+		local price = info and (info.PriceInRobux or info.Price)
+		local line = string.format("• %s [%s] (%s)%s",
+			name,
+			tostring(id),
+			kind,
+			price and (" - R$" .. commas(price)) or ""
+		)
+
+		table.insert(logEntries, 1, line)
+		while #logEntries > 12 do
+			table.remove(logEntries)
+		end
+
+		pcall(function()
+			LoggerParagraph:SetDesc(table.concat(logEntries, "\n"))
+		end)
+	end)
+end
+
+local function firstId(...)
+	for i = 1, select("#", ...) do
+		local v = select(i, ...)
+		if type(v) == "number" or (type(v) == "string" and v ~= "") then
+			return v
+		end
+	end
+end
+
+local promptKinds = {
+	ProductPurchase = "Product",
+	GamePassPurchase = "Gamepass",
+	Purchase = "Asset",
+	BundlePurchase = "Bundle",
+	SubscriptionPurchase = "Subscription",
+}
+
+for suffix, kind in pairs(promptKinds) do
+	pcall(function()
+		bind(MarketplaceService["Prompt" .. suffix .. "Requested"], function(_, ...)
+			recordPrompt(kind, firstId(...))
+		end)
+	end)
+end
+
+local httpRequest = (typeof(request) == "function" and request)
+	or (typeof(http_request) == "function" and http_request)
+	or (syn and syn.request)
+	or (http and http.request)
+	or (fluxus and fluxus.request)
+
+local function getJson(url)
+	local body
+	if httpRequest then
+		local ok, res = pcall(httpRequest, {Url = url, Method = "GET"})
+		if ok and type(res) == "table" and (res.StatusCode == 200 or (res.StatusCode == nil and res.Success)) then
+			body = res.Body
+		end
+	end
+	if not body then
+		local ok, res = pcall(function()
+			return game:HttpGet(url)
+		end)
+		if ok then
+			body = res
+		end
+	end
+	if type(body) ~= "string" or body == "" then
+		return nil
+	end
+	local ok, data = pcall(HttpService.JSONDecode, HttpService, body)
+	return ok and data or nil
+end
+
+local function nonEmpty(s)
+	return type(s) == "string" and s ~= "" and s or nil
+end
+
+local passSources = {
+	{
+		hosts = {"apis.roblox.com", "apis.roproxy.com"},
+		url = function(host, universeId, cursor)
+			local page = cursor and "&pageToken=" .. HttpService:UrlEncode(cursor) or ""
+			return ("https://%s/game-passes/v1/universes/%d/game-passes?passView=Full&pageSize=100%s"):format(host, universeId, page)
+		end,
+		parse = function(d)
+			if type(d) ~= "table" or type(d.gamePasses) ~= "table" then return nil end
+			local out = {}
+			for _, p in ipairs(d.gamePasses) do
+				local priceInfo = type(p.priceInformation) == "table" and p.priceInformation or {}
+				table.insert(out, {
+					id = p.id or p.gamePassId,
+					name = p.displayName or p.name,
+					price = p.price or priceInfo.defaultPriceInRobux or priceInfo.price,
+				})
+			end
+			return out, nonEmpty(d.nextPageToken)
+		end,
+	},
+	{
+		hosts = {"games.roblox.com", "games.roproxy.com"},
+		url = function(host, universeId, cursor)
+			local page = cursor and "&cursor=" .. HttpService:UrlEncode(cursor) or ""
+			return ("https://%s/v1/games/%d/game-passes?limit=100&sortOrder=Asc%s"):format(host, universeId, page)
+		end,
+		parse = function(d)
+			if type(d) ~= "table" or type(d.data) ~= "table" then return nil end
+			local out = {}
+			for _, p in ipairs(d.data) do
+				table.insert(out, {id = p.id, name = p.displayName or p.name, price = p.price})
+			end
+			return out, nonEmpty(d.nextPageCursor)
+		end,
+	},
+}
+
+local function fetchGamepasses(universeId)
+	if not universeId or universeId == 0 then return nil end
+	for _, source in ipairs(passSources) do
+		for _, host in ipairs(source.hosts) do
+			local all, cursor = source.parse(getJson(source.url(host, universeId)))
+			if all then
+				local pages = 1
+				while cursor and pages < 25 do
+					local more, nextCursor = source.parse(getJson(source.url(host, universeId, cursor)))
+					if not more then break end
+					for _, p in ipairs(more) do
+						table.insert(all, p)
+					end
+					cursor, pages = nextCursor, pages + 1
+				end
+				return all
+			end
+		end
+	end
+	return nil
+end
+
+local function fetchProducts()
+	local ok, pages = pcall(function()
+		return MarketplaceService:GetDeveloperProductsAsync()
+	end)
+	if not ok or not pages then return nil end
+	local out = {}
+	for _ = 1, 50 do
+		local okPage, page = pcall(function()
+			return pages:GetCurrentPage()
+		end)
+		if not okPage then break end
+		for _, item in ipairs(page) do
+			table.insert(out, {
+				id = item.ProductId or item.DeveloperProductId,
+				name = item.Name or item.DisplayName,
+				price = item.PriceInRobux,
+			})
+		end
+		if pages.IsFinished or not pcall(function() pages:AdvanceToNextPageAsync() end) then
+			break
+		end
+	end
+	return out
+end
+
+local function scanGameCatalog()
+	if destroyed then return end
+	task.spawn(function()
+		local passes = fetchGamepasses(game.GameId)
+		local products = fetchProducts()
+		if destroyed then return end
+
+		local lines = {}
+		if passes and #passes > 0 then
+			for i = 1, math.min(#passes, 10) do
+				local p = passes[i]
+				if p.id then
+					knownKinds[tostring(p.id)] = "Gamepass"
+					table.insert(lines, string.format("[Pass] %s — ID: %s (%s)",
+						tostring(p.name or "Unnamed"),
+						tostring(p.id),
+						p.price and ("R$" .. commas(p.price)) or "Offsale"
+					))
+				end
+			end
+		end
+		if products and #products > 0 then
+			for i = 1, math.min(#products, 10) do
+				local pr = products[i]
+				if pr.id then
+					knownKinds[tostring(pr.id)] = "Product"
+					table.insert(lines, string.format("[Product] %s — ID: %s (%s)",
+						tostring(pr.name or "Unnamed"),
+						tostring(pr.id),
+						pr.price and ("R$" .. commas(pr.price)) or "Offsale"
+					))
+				end
+			end
+		end
+
+		local desc = (#lines > 0) and table.concat(lines, "\n") or "No gamepasses or products found for this place."
+		pcall(function()
+			CatalogParagraph:SetDesc(desc)
+		end)
+	end)
+end
+
+ProductFakerTab:Button({
+	Title = "Refresh Passes & Products",
+	Desc = "Re-scans gamepasses and developer products for this game",
+	Callback = function()
+		scanGameCatalog()
+	end
+})
+
+-- ==========================================
+-- GAMES TAB (SUPPORTED GAMES LIST)
+-- ==========================================
+local GamesListParagraph = GamesTab:Paragraph({
+	Title = "Supported Games List",
+	Desc = "Loading supported games..."
+})
+
+local function getFromHosts(path, hosts)
+	for _, host in ipairs(hosts) do
+		local d = getJson("https://" .. host .. path)
+		if type(d) == "table" then
+			return d
+		end
+	end
+end
+
+local universeCache = {}
+local function getUniverseId(placeId)
+	if placeId == game.PlaceId and game.GameId ~= 0 then
+		return game.GameId
+	end
+	if universeCache[placeId] then
+		return universeCache[placeId]
+	end
+	local d = getFromHosts("/universes/v1/places/" .. placeId .. "/universe", {"apis.roblox.com", "apis.roproxy.com"})
+	local id = d and tonumber(d.universeId)
+	universeCache[placeId] = id
+	return id
+end
+
+local function getGameStats(universeIds)
+	local out = {}
+	for i = 1, #universeIds, 50 do
+		local chunk = table.concat(universeIds, ",", i, math.min(i + 49, #universeIds))
+		local d = getFromHosts("/v1/games?universeIds=" .. chunk, {"games.roblox.com", "games.roproxy.com"})
+		if d and type(d.data) == "table" then
+			for _, g in ipairs(d.data) do
+				out[tonumber(g.id)] = g
+			end
+		end
+	end
+	return out
+end
+
+local firstSupportedPlaceId = nil
+
+local function loadSupportedGames()
+	if destroyed then return end
+	task.spawn(function()
+		local ok, list = pcall(function()
+			return loadstring(game:HttpGet(supportedUrl))()
+		end)
+		if destroyed then return end
+
+		if not ok or type(list) ~= "table" then
+			pcall(function()
+				GamesListParagraph:SetDesc("Couldn't load the supported games list.")
+			end)
+			return
+		end
+
+		local entries = {}
+		for _, entry in ipairs(list) do
+			local placeId, name = entry, nil
+			if type(entry) == "table" then
+				placeId, name = entry.PlaceId or entry[1], entry.Name
+			end
+			placeId = tonumber(placeId)
+			if placeId then
+				if not firstSupportedPlaceId then
+					firstSupportedPlaceId = placeId
+				end
+				table.insert(entries, {
+					placeId = placeId,
+					name = name or ("Place " .. placeId),
+					here = (placeId == game.PlaceId),
+					named = (name ~= nil),
+				})
+			end
+		end
+
+		if #entries == 0 then
+			pcall(function()
+				GamesListParagraph:SetDesc("No supported games listed.")
+			end)
+			return
+		end
+
+		local pending = #entries
+		for _, e in ipairs(entries) do
+			task.spawn(function()
+				local okId, id = pcall(getUniverseId, e.placeId)
+				e.universeId = okId and id or nil
+				pending -= 1
+			end)
+		end
+		while pending > 0 and not destroyed do
+			task.wait()
+		end
+		if destroyed then return end
+
+		local ids, seen = {}, {}
+		for _, e in ipairs(entries) do
+			if e.universeId and not seen[e.universeId] then
+				seen[e.universeId] = true
+				table.insert(ids, e.universeId)
+			end
+		end
+
+		local stats = #ids > 0 and getGameStats(ids) or {}
+		if destroyed then return end
+
+		local lines = {}
+		for _, e in ipairs(entries) do
+			local g = e.universeId and stats[e.universeId]
+			local displayName = (not e.named and g and g.name) and g.name or e.name
+			local playerText = (g and g.playing) and (commas(g.playing) .. " playing") or "Players unavailable"
+			table.insert(lines, string.format("• %s [%d] — %s%s",
+				displayName,
+				e.placeId,
+				playerText,
+				e.here and " (Current)" or ""
+			))
+		end
+
+		pcall(function()
+			GamesListParagraph:SetDesc(table.concat(lines, "\n"))
+		end)
+	end)
+end
+
+GamesTab:Button({
+	Title = "Refresh Supported Games",
+	Desc = "Reloads the supported games list and live player counts",
+	Callback = function()
+		loadSupportedGames()
+	end
+})
+
+GamesTab:Button({
+	Title = "Teleport to First Listed Game",
+	Desc = "Teleports to the first supported game in the list",
+	Callback = function()
+		if not firstSupportedPlaceId then
+			notify("Games", "No supported game Place ID loaded yet.")
+			return
+		end
+		if firstSupportedPlaceId == game.PlaceId then
+			notify("Games", "You are already in this game.")
+			return
+		end
+		notify("Games", "Teleporting...")
+		pcall(TeleportService.Teleport, TeleportService, firstSupportedPlaceId, LocalPlayer)
+	end
+})
 
 -- Global Cleanup Function
 getgenv().VibecodedHub_Universal_Cleanup = function()
-    for _, conn in ipairs(connections) do
-        if conn.Connected then conn:Disconnect() end
-    end
-    if Window and Window.Destroy then
-        pcall(function() Window:Destroy() end)
-    end
+	destroyed = true
+	for _, conn in ipairs(connections) do
+		if conn.Connected then
+			conn:Disconnect()
+		end
+	end
+	table.clear(connections)
+	if Window and Window.Destroy then
+		pcall(function() Window:Destroy() end)
+	end
 end
+
+scanGameCatalog()
+loadSupportedGames()
