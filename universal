@@ -17,7 +17,8 @@ local supportedUrl = "https://loadstring.net/raw/TCiFuJc4kK"
 -- State
 local connections = {}
 local destroyed = false
-local fakeProductIdInput = ""
+local selectedCatalogId = nil
+local catalogIdByLabel = {}
 
 local soundSettings = {
 	Enabled = true,
@@ -47,11 +48,6 @@ end
 local function commas(n)
 	local s = tostring(math.floor(tonumber(n) or 0))
 	return (s:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", ""))
-end
-
-local function copyText(text)
-	local fn = setclipboard or toclipboard or set_clipboard or (Clipboard and Clipboard.set)
-	return fn ~= nil and (pcall(fn, tostring(text)))
 end
 
 local function getEnum(enumName, itemName)
@@ -123,7 +119,7 @@ SatisfyingTab:Paragraph({
 
 SatisfyingTab:Paragraph({
 	Title = "Audio Settings",
-	Desc = "Manage global input sound toggles and volume level."
+	Desc = "Toggle global input sound feedback."
 })
 
 SatisfyingTab:Toggle({
@@ -132,18 +128,6 @@ SatisfyingTab:Toggle({
 	Value = true,
 	Callback = function(state)
 		soundSettings.Enabled = state
-	end
-})
-
-SatisfyingTab:Slider({
-	Title = "Sound Volume",
-	Desc = "Adjust audio volume intensity",
-	Min = 0.1,
-	Max = 5,
-	Default = 1,
-	Step = 0.1,
-	Callback = function(value)
-		soundSettings.Volume = value
 	end
 })
 
@@ -220,15 +204,15 @@ local function fakePurchase(id)
 	return kind
 end
 
-local function runProductByValue(rawValue)
-	local id = tonumber((tostring(rawValue or ""):gsub("%s", "")):match("^%d+$"))
-	if not id then
-		notify("Product Faker", "Enter a valid numeric Product / Pass ID first.")
+local function runProductById(id)
+	local numericId = tonumber(id)
+	if not numericId then
+		notify("Product Faker", "Choose a product or gamepass from the list first.")
 		return
 	end
-	local ok, res = pcall(fakePurchase, id)
+	local ok, res = pcall(fakePurchase, numericId)
 	if ok then
-		notify("Product Faker", ("Faked %s (%d)"):format(res:lower(), id))
+		notify("Product Faker", ("Faked %s (%d)"):format(res:lower(), numericId))
 	else
 		warn("[Vibecoded Hub] Product faker error: " .. tostring(res))
 		notify("Product Faker", "Failed to fake purchase. Check console (F9).")
@@ -237,23 +221,27 @@ end
 
 ProductFakerTab:Paragraph({
 	Title = "Fake Purchase Runner",
-	Desc = "Enter a Developer Product, Gamepass, or Asset ID and press Run Product. Works in games that trust client purchase signals."
+	Desc = "Select a product or gamepass from the list below and press Run Product."
 })
 
-ProductFakerTab:Input({
-	Title = "Run Product ID",
-	Desc = "Paste or type a Product / Gamepass ID",
-	Placeholder = "Enter ID here...",
-	Callback = function(text)
-		fakeProductIdInput = tostring(text or "")
+local ProductSelectDropdown = ProductFakerTab:Dropdown({
+	Title = "Choose Product / Pass",
+	Desc = "Pick a product or gamepass from this game to fake",
+	Values = {"Scanning game products..."},
+	Value = "Scanning game products...",
+	Callback = function(selectedOption)
+		if type(selectedOption) == "table" then
+			selectedOption = selectedOption[1]
+		end
+		selectedCatalogId = catalogIdByLabel[tostring(selectedOption or "")]
 	end
 })
 
 ProductFakerTab:Button({
 	Title = "Run Product",
-	Desc = "Fakes the purchase for the entered ID",
+	Desc = "Fakes the selected product or gamepass",
 	Callback = function()
-		runProductByValue(fakeProductIdInput)
+		runProductById(selectedCatalogId)
 	end
 })
 
@@ -452,33 +440,64 @@ local function scanGameCatalog()
 		local products = fetchProducts()
 		if destroyed then return end
 
+		table.clear(catalogIdByLabel)
+		local dropdownOptions = {}
 		local lines = {}
+
 		if passes and #passes > 0 then
-			for i = 1, math.min(#passes, 10) do
-				local p = passes[i]
+			for _, p in ipairs(passes) do
 				if p.id then
+					local numericId = tonumber(p.id)
 					knownKinds[tostring(p.id)] = "Gamepass"
-					table.insert(lines, string.format("[Pass] %s — ID: %s (%s)",
+					local priceText = p.price and ("R$" .. commas(p.price)) or "Offsale"
+					local optionLabel = string.format("[Pass] %s (%s) - %s",
 						tostring(p.name or "Unnamed"),
 						tostring(p.id),
-						p.price and ("R$" .. commas(p.price)) or "Offsale"
-					))
+						priceText
+					)
+					catalogIdByLabel[optionLabel] = numericId
+					table.insert(dropdownOptions, optionLabel)
+					if #lines < 15 then
+						table.insert(lines, "• " .. optionLabel)
+					end
 				end
 			end
 		end
+
 		if products and #products > 0 then
-			for i = 1, math.min(#products, 10) do
-				local pr = products[i]
+			for _, pr in ipairs(products) do
 				if pr.id then
+					local numericId = tonumber(pr.id)
 					knownKinds[tostring(pr.id)] = "Product"
-					table.insert(lines, string.format("[Product] %s — ID: %s (%s)",
+					local priceText = pr.price and ("R$" .. commas(pr.price)) or "Offsale"
+					local optionLabel = string.format("[Product] %s (%s) - %s",
 						tostring(pr.name or "Unnamed"),
 						tostring(pr.id),
-						pr.price and ("R$" .. commas(pr.price)) or "Offsale"
-					))
+						priceText
+					)
+					catalogIdByLabel[optionLabel] = numericId
+					table.insert(dropdownOptions, optionLabel)
+					if #lines < 20 then
+						table.insert(lines, "• " .. optionLabel)
+					end
 				end
 			end
 		end
+
+		if #dropdownOptions == 0 then
+			dropdownOptions = {"No products or gamepasses found"}
+			selectedCatalogId = nil
+		else
+			selectedCatalogId = catalogIdByLabel[dropdownOptions[1]]
+		end
+
+		pcall(function()
+			if ProductSelectDropdown.Refresh then
+				ProductSelectDropdown:Refresh(dropdownOptions, true)
+			elseif ProductSelectDropdown.SetValues then
+				ProductSelectDropdown:SetValues(dropdownOptions)
+			end
+		end)
 
 		local desc = (#lines > 0) and table.concat(lines, "\n") or "No gamepasses or products found for this place."
 		pcall(function()
