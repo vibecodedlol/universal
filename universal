@@ -1,0 +1,113 @@
+-- Clean up old instances and connections if re-executed
+if getgenv().VibecodedHub_Universal_Cleanup then
+    pcall(getgenv().VibecodedHub_Universal_Cleanup)
+end
+
+-- Services
+local SoundService = game:GetService("SoundService")
+local UserInputService = game:GetService("UserInputService")
+
+-- Sound Settings State
+local soundSettings = {
+    Enabled = true,
+    Volume = 1 -- Default volume (1 = 100%)
+}
+
+local connections = {}
+
+-- Function to play the input sound effect
+local function playInputSound()
+    if not soundSettings.Enabled then return end
+    pcall(function()
+        local sound = Instance.new("Sound")
+        sound.SoundId = "rbxassetid://113108830240353"
+        sound.Volume = soundSettings.Volume
+        sound.Parent = SoundService
+        sound:Play()
+        sound.Ended:Connect(function()
+            sound:Destroy()
+        end)
+    end)
+end
+
+-- Load WindUI Library
+local successWind, WindUI = pcall(function()
+    return loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+end)
+
+if not successWind or not WindUI then
+    warn("[Vibecoded Hub] Failed to load WindUI library.")
+    return
+end
+
+-- Create Window
+local Window = WindUI:CreateWindow({
+    Title = "Vibecoded Hub",
+    Icon = "sparkles",
+    Author = "Universal",
+    Folder = "VibecodedHub_Universal",
+    Size = UDim2.fromOffset(480, 300),
+    Transparent = true,
+    Theme = "Dark",
+})
+
+-- Set Menu Keybind to N
+Window:SetToggleKey(Enum.KeyCode.N)
+
+-- Create Tab: Satisfying
+local SatisfyingTab = Window:Tab({
+    Title = "Satisfying",
+    Icon = "sparkles",
+})
+
+SatisfyingTab:Paragraph({
+    Title = "Game Status",
+    Desc = "Current Place ID: " .. tostring(game.PlaceId) .. "\nRunning Vibecoded Hub (Universal)."
+})
+
+-- Section for Sound Controls
+SatisfyingTab:Paragraph({
+    Title = "Audio Settings",
+    Desc = "Manage global input sound toggles and volume level."
+})
+
+-- Toggle to enable/disable sound
+SatisfyingTab:Toggle({
+    Title = "Enable Input Sound",
+    Desc = "Plays sound effect on every keypress (WASD, etc.) and mouse click",
+    Value = true,
+    Callback = function(state)
+        soundSettings.Enabled = state
+    end
+})
+
+-- Slider to control volume
+SatisfyingTab:Slider({
+    Title = "Sound Volume",
+    Desc = "Adjust audio volume intensity",
+    Min = 0.1,
+    Max = 5,
+    Default = 1,
+    Step = 0.1,
+    Callback = function(value)
+        soundSettings.Volume = value
+    end
+})
+
+-- Global Keyboard & Mouse Input Listener
+local inputConn = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if input.UserInputType == Enum.UserInputType.Keyboard or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        playInputSound()
+    end
+end)
+table.insert(connections, inputConn)
+
+-- Global Cleanup Function
+getgenv().VibecodedHub_Universal_Cleanup = function()
+    for _, conn in ipairs(connections) do
+        if conn.Connected then conn:Disconnect() end
+    end
+    if Window and Window.Destroy then
+        pcall(function() Window:Destroy() end)
+    end
+end
