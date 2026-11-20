@@ -1,0 +1,716 @@
+-- Clean up old instances, UI, and loops if re-executed
+if getgenv().VibecodedHub_DragonSoul_Cleanup then
+    pcall(getgenv().VibecodedHub_DragonSoul_Cleanup)
+end
+
+-- Services
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local CoreGui = game:GetService("CoreGui")
+local SoundService = game:GetService("SoundService")
+local UserInputService = game:GetService("UserInputService")
+
+local localPlayer = Players.LocalPlayer
+
+-- Determine safe UI parent
+local uiParent = (gethui and gethui()) or CoreGui or localPlayer:WaitForChild("PlayerGui")
+
+-- Remove lingering instances
+for _, gui in ipairs(uiParent:GetChildren()) do
+    if gui.Name == "VibecodedHub_Folder" or gui.Name == "DragonSoul_Folder" or gui.Name == "WindUI" then
+        gui:Destroy()
+    end
+end
+
+-- Create dedicated folder for ESP & Map Markers
+local visualFolder = Instance.new("Folder")
+visualFolder.Name = "VibecodedHub_Folder"
+visualFolder.Parent = uiParent
+
+-- Load WindUI Library
+local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+
+-- ==========================================
+-- SAVED MAP / ISLAND LOCATIONS
+-- ==========================================
+local MapLocations = {
+    { Name = "Great Plains", Position = Vector3.new(-1085, 397, -6272) },
+    { Name = "City", Position = Vector3.new(-2927, 603, -5208) },
+    { Name = "Ape", Position = Vector3.new(-345, 398, -10360) },
+    { Name = "Power Tower", Position = Vector3.new(-7455, 390, 522) },
+    { Name = "Frozen Village", Position = Vector3.new(-10189, 406, 3657) },
+    { Name = "East City", Position = Vector3.new(-2859, 648, 3448) },
+    { Name = "Galactic", Position = Vector3.new(-4266, 507, -630) },
+    { Name = "Jungle", Position = Vector3.new(-1475, 449, -2807) },
+    { Name = "Red Ribbon", Position = Vector3.new(1554, 509, -3071) },
+    { Name = "North Pole", Position = Vector3.new(-11704, 416, 10178) },
+}
+
+-- Build island name list and default selection table for Lootboxes
+local IslandNames = {}
+local selectedLootboxIslands = {}
+for _, mapData in ipairs(MapLocations) do
+    table.insert(IslandNames, mapData.Name)
+    selectedLootboxIslands[mapData.Name] = true
+end
+
+local MAX_MAP_SNAP_DISTANCE = 2500
+
+-- State & Tracking
+local espEnabled = true
+local lootboxEspEnabled = false
+local ignoreStaticProps = true
+local trackedBalls = {}         -- [obj] = { Billboard, TextLabel, TargetPart }
+local trackedLootboxes = {}     -- [obj] = { Billboard, TextLabel, TargetPart }
+local activeMapMarkers = {}     -- [mapIndex] = { Part, Billboard, TextLabel }
+local blacklistedInstances = {} -- [obj] = true
+local blacklistedPositions = {} -- { { Pos = Vector3, Radius = number }, ... }
+local connections = {}
+
+-- Satisfying Audio Settings State
+local soundSettings = {
+    Enabled = true,
+    Volume = 1
+}
+
+-- Function to play the input sound effect
+local function playInputSound()
+    if not soundSettings.Enabled then return end
+    pcall(function()
+        local sound = Instance.new("Sound")
+        sound.SoundId = "rbxassetid://113108830240353"
+        sound.Volume = soundSettings.Volume
+        sound.Parent = SoundService
+        sound:Play()
+        sound.Ended:Connect(function()
+            sound:Destroy()
+        end)
+    end)
+end
+
+-- Create WindUI Window
+local Window = WindUI:CreateWindow({
+    Title = "Vibecoded Hub",
+    Icon = "flame",
+    Author = "Dragon Soul",
+    Folder = "VibecodedHub_DragonSoul",
+    Size = UDim2.fromOffset(470, 390),
+    Transparent = true,
+    Theme = "Dark",
+})
+
+-- Set Menu Keybind to N
+Window:SetToggleKey(Enum.KeyCode.N)
+
+-- ==========================================
+-- TAB 1: ESP (DRAGON BALLS)
+-- ==========================================
+local EspTab = Window:Tab({
+    Title = "ESP",
+    Icon = "eye",
+})
+
+local StatusParagraph = EspTab:Paragraph({
+    Title = "Active Detection Status",
+    Desc = "Scanning workspace..."
+})
+
+-- ==========================================
+-- TAB 2: LOOTBOX (ABOVE SATISFYING)
+-- ==========================================
+local LootboxTab = Window:Tab({
+    Title = "Lootbox",
+    Icon = "package",
+})
+
+local LootboxStatusParagraph = LootboxTab:Paragraph({
+    Title = "Lootbox Tracker",
+    Desc = "Lootbox ESP is disabled."
+})
+
+-- ==========================================
+-- TAB 3: SATISFYING (AUDIO)
+-- ==========================================
+local SatisfyingTab = Window:Tab({
+    Title = "Satisfying",
+    Icon = "sparkles",
+})
+
+SatisfyingTab:Paragraph({
+    Title = "Audio Settings",
+    Desc = "Manage global input sound toggles and volume level."
+})
+
+SatisfyingTab:Toggle({
+    Title = "Enable Input Sound",
+    Desc = "Plays sound effect on every keypress (WASD, etc.) and mouse click",
+    Value = true,
+    Callback = function(state)
+        soundSettings.Enabled = state
+    end
+})
+
+SatisfyingTab:Slider({
+    Title = "Sound Volume",
+    Desc = "Adjust audio volume intensity",
+    Min = 0.1,
+    Max = 5,
+    Default = 1,
+    Step = 0.1,
+    Callback = function(value)
+        soundSettings.Volume = value
+    end
+})
+
+-- Global Keyboard & Mouse Input Listener (tracked for clean disconnect)
+local inputConn = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if input.UserInputType == Enum.UserInputType.Keyboard or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        playInputSound()
+    end
+end)
+table.insert(connections, inputConn)
+
+-- ==========================================
+-- ESP & MAP LOGIC
+-- ==========================================
+local function getNearestMap(position)
+    local closestIndex = nil
+    local shortestDist = math.huge
+
+    for index, mapData in ipairs(MapLocations) do
+        local dist = (position - mapData.Position).Magnitude
+        if dist < shortestDist and dist <= MAX_MAP_SNAP_DISTANCE then
+            shortestDist = dist
+            closestIndex = index
+        end
+    end
+
+    return closestIndex, closestIndex and MapLocations[closestIndex] or nil
+end
+
+local function getOrCreateMapMarker(mapIndex)
+    if activeMapMarkers[mapIndex] then
+        return activeMapMarkers[mapIndex]
+    end
+
+    local mapData = MapLocations[mapIndex]
+    if not mapData then return nil end
+
+    local anchorPart = Instance.new("Part")
+    anchorPart.Name = "ActiveMapAnchor_" .. mapData.Name
+    anchorPart.Size = Vector3.new(1, 1, 1)
+    anchorPart.Position = mapData.Position + Vector3.new(0, 60, 0)
+    anchorPart.Anchored = true
+    anchorPart.CanCollide = false
+    anchorPart.Transparency = 1
+    anchorPart.Parent = visualFolder
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "ActiveMapESP_" .. mapData.Name
+    billboard.Size = UDim2.new(0, 170, 0, 50)
+    billboard.StudsOffset = Vector3.new(0, 25, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Enabled = espEnabled
+    billboard.Adornee = anchorPart
+    billboard.Parent = visualFolder
+
+    local textLabel = Instance.new("TextLabel")
+    textLabel.Size = UDim2.new(1, 0, 1, 0)
+    textLabel.BackgroundTransparency = 1
+    textLabel.Text = mapData.Name
+    textLabel.TextColor3 = Color3.fromRGB(0, 210, 255)
+    textLabel.TextStrokeTransparency = 0.3
+    textLabel.TextSize = 14
+    textLabel.Font = Enum.Font.GothamBold
+    textLabel.Parent = billboard
+
+    local marker = {
+        Name = mapData.Name,
+        Position = mapData.Position,
+        Part = anchorPart,
+        Billboard = billboard,
+        TextLabel = textLabel
+    }
+    activeMapMarkers[mapIndex] = marker
+    return marker
+end
+
+local function destroyMapMarker(mapIndex)
+    local marker = activeMapMarkers[mapIndex]
+    if marker then
+        if marker.Billboard then marker.Billboard:Destroy() end
+        if marker.Part then marker.Part:Destroy() end
+        activeMapMarkers[mapIndex] = nil
+    end
+end
+
+local function destroyAllMapMarkers()
+    for mapIndex in pairs(activeMapMarkers) do
+        destroyMapMarker(mapIndex)
+    end
+end
+
+local function getTargetPart(obj)
+    if obj:IsA("BasePart") then
+        return obj
+    elseif obj:IsA("Model") then
+        return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
+    end
+    return nil
+end
+
+local function isStaticMapOrQuestProp(obj)
+    local fullPath = obj:GetFullName():lower()
+    local blockedKeywords = {
+        "quest", "npc", "shop", "deco", "decoration", "prop",
+        "building", "capsule", "radar", "display", "fake", "statue", "pedestal",
+        "shenron", "altar", "shrine", "lobby", "spawn", "terrain", "world", "map",
+        "assets", "architecture", "structures", "effects", "vfx"
+    }
+
+    local isExplicitSpawnFolder = fullPath:find("dragonballspawns", 1, true)
+        or fullPath:find("dragonballs", 1, true)
+        or fullPath:find("itemspawns", 1, true)
+        or fullPath:find("drops", 1, true)
+
+    if not isExplicitSpawnFolder then
+        for _, word in ipairs(blockedKeywords) do
+            if fullPath:find(word, 1, true) then
+                return true
+            end
+        end
+    end
+
+    local hasTrigger = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
+        or obj:FindFirstChildWhichIsA("ClickDetector", true)
+        or obj:FindFirstChildWhichIsA("TouchTransmitter", true)
+
+    if not hasTrigger and obj.Parent and obj.Parent ~= Workspace then
+        hasTrigger = obj.Parent:FindFirstChildWhichIsA("ProximityPrompt", true)
+            or obj.Parent:FindFirstChildWhichIsA("ClickDetector", true)
+            or obj.Parent:FindFirstChildWhichIsA("TouchTransmitter", true)
+    end
+
+    return not hasTrigger
+end
+
+local function isValidDragonBall(obj)
+    if not obj or not obj.Parent then return false end
+    if blacklistedInstances[obj] then return false end
+    if not obj:IsDescendantOf(Workspace) then return false end
+    if not obj:IsA("Model") and not obj:IsA("BasePart") then return false end
+    if Players:GetPlayerFromCharacter(obj) or obj:IsDescendantOf(Workspace.CurrentCamera) then
+        return false
+    end
+
+    if obj:FindFirstAncestorOfClass("Tool") or obj:FindFirstAncestorOfClass("Accessory") then
+        return false
+    end
+    local ancestorModel = obj:FindFirstAncestorOfClass("Model")
+    if ancestorModel and ancestorModel:FindFirstChildOfClass("Humanoid") then
+        return false
+    end
+
+    local lowerName = obj.Name:lower()
+    if lowerName:find("dragonball") == nil and lowerName:find("dragon ball") == nil then
+        return false
+    end
+
+    local targetPart = getTargetPart(obj)
+    if not targetPart or targetPart.Position.Magnitude < 1 then
+        return false
+    end
+
+    local pos = targetPart.Position
+    for _, zone in ipairs(blacklistedPositions) do
+        if (pos - zone.Pos).Magnitude < zone.Radius then
+            return false
+        end
+    end
+
+    if ignoreStaticProps and isStaticMapOrQuestProp(obj) then
+        return false
+    end
+
+    return true
+end
+
+local function isValidLootbox(obj)
+    if not obj or not obj.Parent then return false end
+    if not obj:IsDescendantOf(Workspace) then return false end
+    if not obj:IsA("Model") then return false end
+    if Players:GetPlayerFromCharacter(obj) or obj:IsDescendantOf(Workspace.CurrentCamera) then
+        return false
+    end
+
+    if obj.Name:lower():find("lootbox", 1, true) == nil then
+        return false
+    end
+
+    local targetPart = getTargetPart(obj)
+    if not targetPart or targetPart.Position.Magnitude < 1 then
+        return false
+    end
+
+    return true
+end
+
+local function isLootboxIslandAllowed(position)
+    local _, nearestMap = getNearestMap(position)
+    if not nearestMap then
+        return false
+    end
+    return selectedLootboxIslands[nearestMap.Name] == true
+end
+
+local function createESP(targetObj)
+    if trackedBalls[targetObj] then return end
+    if not isValidDragonBall(targetObj) then return end
+
+    local targetPart = getTargetPart(targetObj)
+    if not targetPart then return end
+
+    local newPos = targetPart.Position
+
+    -- Position de-duplication (< 8 studs)
+    for _, existingData in pairs(trackedBalls) do
+        if existingData.TargetPart and (existingData.TargetPart.Position - newPos).Magnitude < 8 then
+            return
+        end
+    end
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "DragonBall_Tag"
+    billboard.Size = UDim2.new(0, 140, 0, 45)
+    billboard.StudsOffset = Vector3.new(0, 2, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Enabled = espEnabled
+    billboard.Adornee = targetPart
+    billboard.Parent = visualFolder
+
+    local textLabel = Instance.new("TextLabel")
+    textLabel.Size = UDim2.new(1, 0, 1, 0)
+    textLabel.BackgroundTransparency = 1
+    textLabel.Text = "Dragon Ball"
+    textLabel.TextColor3 = Color3.fromRGB(255, 140, 0)
+    textLabel.TextStrokeTransparency = 0.3
+    textLabel.TextSize = 14
+    textLabel.Font = Enum.Font.GothamBold
+    textLabel.Parent = billboard
+
+    trackedBalls[targetObj] = {
+        Billboard = billboard,
+        TextLabel = textLabel,
+        TargetPart = targetPart
+    }
+
+    local mapIndex = getNearestMap(newPos)
+    if mapIndex then
+        getOrCreateMapMarker(mapIndex)
+    end
+end
+
+local function createLootboxESP(targetObj)
+    if trackedLootboxes[targetObj] then return end
+    if not isValidLootbox(targetObj) then return end
+
+    local targetPart = getTargetPart(targetObj)
+    if not targetPart then return end
+
+    local allowed = isLootboxIslandAllowed(targetPart.Position)
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "Lootbox_Tag"
+    billboard.Size = UDim2.new(0, 150, 0, 45)
+    billboard.StudsOffset = Vector3.new(0, 2.5, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Enabled = lootboxEspEnabled and allowed
+    billboard.Adornee = targetPart
+    billboard.Parent = visualFolder
+
+    local textLabel = Instance.new("TextLabel")
+    textLabel.Size = UDim2.new(1, 0, 1, 0)
+    textLabel.BackgroundTransparency = 1
+    textLabel.Text = "Lootbox"
+    textLabel.TextColor3 = Color3.fromRGB(80, 255, 140)
+    textLabel.TextStrokeTransparency = 0.3
+    textLabel.TextSize = 14
+    textLabel.Font = Enum.Font.GothamBold
+    textLabel.Parent = billboard
+
+    trackedLootboxes[targetObj] = {
+        Billboard = billboard,
+        TextLabel = textLabel,
+        TargetPart = targetPart
+    }
+end
+
+local function clearTrackedBalls()
+    for _, data in pairs(trackedBalls) do
+        if data.Billboard then data.Billboard:Destroy() end
+    end
+    table.clear(trackedBalls)
+    destroyAllMapMarkers()
+end
+
+local function clearTrackedLootboxes()
+    for _, data in pairs(trackedLootboxes) do
+        if data.Billboard then data.Billboard:Destroy() end
+    end
+    table.clear(trackedLootboxes)
+end
+
+local function scanWorkspace()
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if isValidDragonBall(obj) then
+            createESP(obj)
+        end
+        if lootboxEspEnabled and isValidLootbox(obj) then
+            createLootboxESP(obj)
+        end
+    end
+end
+
+-- ==========================================
+-- ESP TAB CONTROLS
+-- ==========================================
+EspTab:Toggle({
+    Title = "Enable DragonBall & Nearest Map ESP",
+    Desc = "Activates map ESP when a real Dragon Ball spawns nearby",
+    Value = true,
+    Callback = function(state)
+        espEnabled = state
+        if espEnabled then
+            scanWorkspace()
+        else
+            destroyAllMapMarkers()
+        end
+
+        for _, data in pairs(trackedBalls) do
+            if data.Billboard then data.Billboard.Enabled = espEnabled end
+        end
+    end
+})
+
+EspTab:Toggle({
+    Title = "Auto-Filter Map / Quest / Altar Props",
+    Desc = "Ignores static Dragon Ball models inside map/world folders",
+    Value = true,
+    Callback = function(state)
+        ignoreStaticProps = state
+        clearTrackedBalls()
+        if espEnabled then
+            scanWorkspace()
+        end
+    end
+})
+
+EspTab:Button({
+    Title = "Blacklist Current False Ball",
+    Desc = "Permanently ignores whatever object is currently triggering the ESP",
+    Callback = function()
+        for obj, data in pairs(trackedBalls) do
+            blacklistedInstances[obj] = true
+            if data.TargetPart then
+                table.insert(blacklistedPositions, { Pos = data.TargetPart.Position, Radius = 30 })
+            end
+        end
+        clearTrackedBalls()
+        if espEnabled then
+            scanWorkspace()
+        end
+    end
+})
+
+-- ==========================================
+-- LOOTBOX TAB CONTROLS
+-- ==========================================
+LootboxTab:Toggle({
+    Title = "Enable Lootbox ESP",
+    Desc = "Highlights Lootbox models on your selected islands",
+    Value = false,
+    Callback = function(state)
+        lootboxEspEnabled = state
+        if lootboxEspEnabled then
+            for _, obj in ipairs(Workspace:GetDescendants()) do
+                if isValidLootbox(obj) then
+                    createLootboxESP(obj)
+                end
+            end
+        else
+            clearTrackedLootboxes()
+        end
+    end
+})
+
+LootboxTab:Dropdown({
+    Title = "Select Islands to ESP",
+    Desc = "Only lootboxes near the checked islands will be displayed",
+    Values = IslandNames,
+    Value = IslandNames,
+    Multi = true,
+    AllowNone = true,
+    Callback = function(selectedList)
+        table.clear(selectedLootboxIslands)
+        if type(selectedList) == "table" then
+            for k, v in pairs(selectedList) do
+                if type(k) == "number" and type(v) == "string" then
+                    selectedLootboxIslands[v] = true
+                elseif type(k) == "string" and v == true then
+                    selectedLootboxIslands[k] = true
+                end
+            end
+        end
+    end
+})
+
+-- Frame Update Loop
+local lastStatusText = ""
+local lastLootboxStatusText = ""
+local renderConn = RunService.RenderStepped:Connect(function()
+    local character = localPlayer.Character
+    local root = character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head"))
+    local originPos = root and root.Position
+
+    local neededMapCounts = {}
+    local statusLines = {}
+
+    for obj, data in pairs(trackedBalls) do
+        if not isValidDragonBall(obj) then
+            if data.Billboard then data.Billboard:Destroy() end
+            trackedBalls[obj] = nil
+        else
+            if not data.TargetPart or not data.TargetPart.Parent then
+                data.TargetPart = getTargetPart(obj)
+                if data.TargetPart then data.Billboard.Adornee = data.TargetPart end
+            end
+
+            local targetPart = data.TargetPart
+            if targetPart and targetPart:IsDescendantOf(Workspace) and targetPart.Position.Magnitude >= 1 then
+                data.Billboard.Enabled = espEnabled
+
+                if espEnabled then
+                    local ballPos = targetPart.Position
+                    local nearestIndex, nearestMap = getNearestMap(ballPos)
+
+                    if nearestIndex then
+                        neededMapCounts[nearestIndex] = (neededMapCounts[nearestIndex] or 0) + 1
+                    end
+
+                    local distToPlayer = originPos and math.floor((ballPos - originPos).Magnitude) or 0
+                    data.TextLabel.Text = string.format("Dragon Ball\n[%d studs]", distToPlayer)
+
+                    local parentName = obj.Parent and obj.Parent.Name or "Workspace"
+                    table.insert(statusLines, string.format(
+                        "• %s (in %s) near %s [%d, %d, %d]",
+                        obj.Name,
+                        parentName,
+                        nearestMap and nearestMap.Name or "Out of Range",
+                        math.floor(ballPos.X),
+                        math.floor(ballPos.Y),
+                        math.floor(ballPos.Z)
+                    ))
+                end
+            else
+                data.Billboard.Enabled = false
+            end
+        end
+    end
+
+    local visibleLootboxCount = 0
+    for obj, data in pairs(trackedLootboxes) do
+        if not lootboxEspEnabled or not isValidLootbox(obj) then
+            if data.Billboard then data.Billboard:Destroy() end
+            trackedLootboxes[obj] = nil
+        else
+            if not data.TargetPart or not data.TargetPart.Parent then
+                data.TargetPart = getTargetPart(obj)
+                if data.TargetPart then data.Billboard.Adornee = data.TargetPart end
+            end
+
+            local targetPart = data.TargetPart
+            if targetPart and targetPart:IsDescendantOf(Workspace) and targetPart.Position.Magnitude >= 1 then
+                local boxPos = targetPart.Position
+                local _, nearestMap = getNearestMap(boxPos)
+                local islandName = nearestMap and nearestMap.Name or nil
+                local allowed = islandName and (selectedLootboxIslands[islandName] == true) or false
+
+                data.Billboard.Enabled = allowed
+                if allowed then
+                    visibleLootboxCount += 1
+                    local distToPlayer = originPos and math.floor((boxPos - originPos).Magnitude) or 0
+                    data.TextLabel.Text = string.format("Lootbox (%s)\n[%d studs]", islandName, distToPlayer)
+                end
+            else
+                data.Billboard.Enabled = false
+            end
+        end
+    end
+
+    local newStatusText = (#statusLines > 0) and table.concat(statusLines, "\n") or "No active Dragon Balls detected."
+    if newStatusText ~= lastStatusText then
+        lastStatusText = newStatusText
+        pcall(function()
+            StatusParagraph:SetDesc(newStatusText)
+        end)
+    end
+
+    local newLootboxStatusText = lootboxEspEnabled
+        and string.format("Showing %d lootbox(es) on selected islands.", visibleLootboxCount)
+        or "Lootbox ESP is disabled."
+    if newLootboxStatusText ~= lastLootboxStatusText then
+        lastLootboxStatusText = newLootboxStatusText
+        pcall(function()
+            LootboxStatusParagraph:SetDesc(newLootboxStatusText)
+        end)
+    end
+
+    if espEnabled then
+        for mapIndex, count in pairs(neededMapCounts) do
+            local marker = getOrCreateMapMarker(mapIndex)
+            if marker then
+                marker.Billboard.Enabled = true
+                local distToMap = originPos and math.floor((marker.Position - originPos).Magnitude) or 0
+                marker.TextLabel.Text = string.format("%s (%d DB)\n[%d studs]", marker.Name, count, distToMap)
+            end
+        end
+
+        for mapIndex in pairs(activeMapMarkers) do
+            if not neededMapCounts[mapIndex] then
+                destroyMapMarker(mapIndex)
+            end
+        end
+    else
+        destroyAllMapMarkers()
+    end
+end)
+table.insert(connections, renderConn)
+
+-- Detect newly spawned DragonBalls and Lootboxes instantly
+local addedConn = Workspace.DescendantAdded:Connect(function(obj)
+    task.wait(0.25)
+    if isValidDragonBall(obj) then
+        createESP(obj)
+    end
+    if lootboxEspEnabled and isValidLootbox(obj) then
+        createLootboxESP(obj)
+    end
+end)
+table.insert(connections, addedConn)
+
+-- Global Cleanup Function
+getgenv().VibecodedHub_DragonSoul_Cleanup = function()
+    for _, conn in ipairs(connections) do
+        if conn.Connected then conn:Disconnect() end
+    end
+    clearTrackedBalls()
+    clearTrackedLootboxes()
+    if visualFolder then visualFolder:Destroy() end
+    if Window and Window.Destroy then
+        pcall(function() Window:Destroy() end)
+    end
+end
+
+-- Initial Scan
+scanWorkspace()
